@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import tensorflow_hub as hub
+import os
 
 hparams = {
     # Task specific constants
@@ -18,10 +19,12 @@ hparams = {
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
-    "LOSS_FUNCTION": 'sparse_categorical_crossentropy'
-    "EMBEDDING_MODEL: "https://tfhub.dev/google/nnlm-en-dim50/2"
+    "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
+    "EMBEDDING_MODEL": "https://tfhub.dev/google/nnlm-en-dim50/2",
+    "LSTM_LAYER": 64,
 
     # Training
+    "LEARNING_RATE": 0.0001,
     "EARLY_STOP_PATIENCE": 15,
     "REDUCE_LR_PATIENCE": 5,
     "REDUCE_LR_FACTOR": 0.2,
@@ -30,12 +33,12 @@ hparams = {
 }
 
 def read_dataset_from_csv(csv_path, training_data):
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(csv_path)
     df.head()
 
     # Standardize labels so they have 0 for negative and 1 for positive
     if training_data:
-        labels = df['label'].apply(lambda x: x.to_numpy())
+        labels = df['label']#.apply(lambda x: x.to_numpy())
 
     # Since the original dataset does not provide headers you need to index the columns by their index
     premise = df['premise'].to_numpy()
@@ -63,8 +66,11 @@ def read_dataset_from_csv(csv_path, training_data):
 
     print(f"{dataset_type_str} dataset contains {len(dataset)} examples\n")
 
-    print(f"Text of second example look like this: {examples[1][0].numpy().decode('utf-8')}\n")
-    print(f"Labels of first 5 examples look like this: {[x[1].numpy() for x in examples]}")
+    if training_data:
+        print(f"Text of second example look like this: {examples[1][0]}\n")
+    else:
+        print(f"Text of second example look like this: {examples[1][0].numpy().decode('utf-8')}\n")
+    #print(f"Labels of first 5 examples look like this: {[x[1].numpy() for x in examples]}")
 
     return dataset
 
@@ -122,9 +128,9 @@ def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, voca
 
     return embedding_layer
 
-def create_and_compile_model(vocab_size, embedding_dim, max_length, vectorizer, embedding_file_path):
+def create_and_compile_model(vocab_size, embedding_dim, max_length, embedding_file_path, lstm_layer, learning_rate):
 
-        """
+    """
     Builds a Siamese-like model with two parallel Bidirectional LSTMs.
 
     Args:
@@ -138,6 +144,8 @@ def create_and_compile_model(vocab_size, embedding_dim, max_length, vectorizer, 
     """
     # --- 1. Define the two input layers for the two phrases ---
     # Each input will be a sequence of integers of shape (max_length,)
+    print(f"max_length {max_length}")
+
     input_a = tf.keras.layers.Input(shape=(max_length,), name='input_phrase_1')
     input_b = tf.keras.layers.Input(shape=(max_length,), name='input_phrase_2')
 
@@ -157,7 +165,7 @@ def create_and_compile_model(vocab_size, embedding_dim, max_length, vectorizer, 
     )
     shared_embedding = hub_embedding_layer
 
-    shared_lstm = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64))
+    shared_lstm = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(lstm_layer))
 
     # --- 3. First LSTM Branch ---
     # Pass the first input through the shared layers
@@ -380,7 +388,9 @@ if __name__ == '__main__':
 
         print()
 
+        print("Decode test dataset")
         test_dataset = read_dataset_from_csv(TEST_DATA_CSV_PATH, training_data = 0)
+        print("Decode train dataset")
         train_dataset_csv = read_dataset_from_csv(TRAIN_DATA_CSV_PATH, training_data = 1)
 
         # Calculate the number of elements for the training set
@@ -392,7 +402,7 @@ if __name__ == '__main__':
         # Create the validation dataset by skipping the first 'train_size' elements
         validation_dataset = train_dataset_csv.skip(train_size)
 
-        SHUFFLE_BUFFER_SIZE = int(num_train_elements.numpy())
+        SHUFFLE_BUFFER_SIZE = 1000 #TODO this may be tuned
         PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE
         train_dataset_final = train_dataset.cache().shuffle(SHUFFLE_BUFFER_SIZE).prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
         validation_dataset_final = validation_dataset.cache().prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
@@ -406,17 +416,8 @@ if __name__ == '__main__':
 
         print()
 
-        text_only_dataset = train_dataset_final.map(lambda text1, text2, label: (text1 + text2))
-        vectorizer = fit_vectorizer(text_only_dataset)
-        vocab_size = vectorizer.vocabulary_size()
-        print(f"Vocabulary contains {vocab_size} words\n")
-
-        print(f"Apply vectorization to train and val datasets")
-        train_dataset_vectorized = train_dataset_final.map(lambda x,y: (vectorizer(x), y))
-        validation_dataset_vectorized = validation_dataset_final.map(lambda x,y: (vectorizer(x), y))
-
         print(f"Create and compile model")
-        nn_model = create_and_compile_model(hparams['VOCAB_SIZE'], hparams['EMBEDDING_DIM'], hparams['MAX_LENGTH'], vectorizer, hparams['EMBEDDING_MODEL'])
+        nn_model = create_and_compile_model(hparams['VOCAB_SIZE'], hparams['EMBEDDING_DIM'], hparams['MAX_LENGTH'], hparams['EMBEDDING_MODEL'], hparams['LSTM_LAYER'], hparams['LEARNING_RATE'])
 
         nn_model.summary()
 
