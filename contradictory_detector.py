@@ -5,6 +5,9 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import tensorflow_hub as hub
 import os
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import json
 
 hparams = {
     # Task specific constants
@@ -15,63 +18,43 @@ hparams = {
     "EMBEDDING_DIM": 128,
     "MAX_LENGTH": 32,
     "TRAINING_SPLIT": 0.9,
-    "BATCH_SIZE": 128,
+    "BATCH_SIZE": 16,
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
     "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
     "EMBEDDING_MODEL": "https://tfhub.dev/google/nnlm-en-dim50/2",
     "LSTM_LAYER": 64,
+    "L2_REG_RATE": 0.001,
 
     # Training
     "LEARNING_RATE": 0.0001,
-    "EARLY_STOP_PATIENCE": 15,
-    "REDUCE_LR_PATIENCE": 5,
+    "EARLY_STOP_PATIENCE": 20,
+    "REDUCE_LR_PATIENCE": 20,
     "REDUCE_LR_FACTOR": 0.2,
     "REDUCE_LR_MIN_LR": 0.00001,
     "EPOCHS": 100
 }
 
-def read_dataset_from_csv(csv_path, training_data):
+def read_data_from_csv(csv_path, is_training_data=True):
+    """
+    Reads a CSV file and returns its columns as numpy arrays.
+    """
     df = pd.read_csv(csv_path)
-    df.head()
-
-    # Standardize labels so they have 0 for negative and 1 for positive
-    if training_data:
-        labels = df['label']#.apply(lambda x: x.to_numpy())
-
-    # Since the original dataset does not provide headers you need to index the columns by their index
+    
     premise = df['premise'].to_numpy()
     hypothesis = df['hypothesis'].to_numpy()
     lang_abv = df['lang_abv'].to_numpy()
 
-    unique_languages = df['language'].unique()
-    print(f"Unique languages found: {unique_languages}")
-    # Create a vocabulary mapping each language to an integer
-    language_vocab = {language: i for i, language in enumerate(unique_languages)}
-    print(f"Language vocabulary: {language_vocab}")
-    # Create the new 'languages' column by mapping the vocabulary
-    language = df['language'].map(language_vocab)
-
-    # Create the dataset
-    if training_data:
-        dataset = tf.data.Dataset.from_tensor_slices(((premise,hypothesis,lang_abv), labels))
+    if is_training_data:
+        labels = df['label'].to_numpy()
+        return premise, hypothesis, lang_abv, labels
     else:
-        dataset = tf.data.Dataset.from_tensor_slices(((premise,hypothesis,lang_abv)))
+        # For test data, also return the 'id' column for the submission file
+        ids = df['id'].to_numpy()
+        return premise, hypothesis, lang_abv, ids
 
-    # Get the first 5 elements of the dataset
-    examples = list(dataset.take(5))
-
-    dataset_type_str = "Training" if training_data else "Test"
-
-    print(f"{dataset_type_str} dataset contains {len(dataset)} examples\n")
-
-    if training_data:
-        print(f"Text of second example look like this: {examples[1][0]}\n")
-    else:
-        print(f"Text of second example look like this: {examples[1][0].numpy().decode('utf-8')}\n")
-    #print(f"Labels of first 5 examples look like this: {[x[1].numpy() for x in examples]}")
-
+    
     return dataset
 
 def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, vocab_size, embedding_dim):
@@ -128,71 +111,66 @@ def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, voca
 
     return embedding_layer
 
-def create_and_compile_model(vocab_size, embedding_dim, max_length, embedding_file_path, lstm_layer, learning_rate):
-
+def create_and_compile_model(vectorizer, lang_data, vocab_size, embedding_dim, lstm_units, learning_rate, l2_rate):
     """
-    Builds a Siamese-like model with two parallel Bidirectional LSTMs.
-
-    Args:
-        vocab_size (int): The size of the vocabulary for the embedding layer.
-        embedding_dim (int): The dimension of the embedding vectors.
-        max_length (int): The maximum length of the input sequences.
-        num_classes (int): The number of output classes for categorization.
-
-    Returns:
-        tf.keras.Model: A compiled Keras model.
+    Builds a Siamese-like model with three inputs and two parallel Bidirectional LSTMs.
+    This version uses a TextVectorization layer and a standard Embedding layer.
     """
-    # --- 1. Define the two input layers for the two phrases ---
-    # Each input will be a sequence of integers of shape (max_length,)
-    print(f"max_length {max_length}")
-
-    input_a = tf.keras.layers.Input(shape=(max_length,), name='input_phrase_1')
-    input_b = tf.keras.layers.Input(shape=(max_length,), name='input_phrase_2')
+    # --- 1. Define the three input layers ---
+    input_premise = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_premise')
+    input_hypothesis = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_hypothesis')
+    input_lang = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_language')
 
     # --- 2. Create Shared Layers ---
-    # It's crucial to use shared layers so that both phrases are processed
-    # in the exact same way and their resulting vectors are comparable.
-    #shared_embedding = create_pretrained_embedding_layer(embedding_file_path, vectorizer, VOCAB_SIZE, EMBEDDING_DIM)
-    embedding_url = embedding_file_path
+    # Use the pre-adapted vectorizer passed into the function
+    shared_vectorizer = vectorizer
 
-    # 2. Create the embedding layer
-    # This layer takes string inputs directly, so you don't need a TextVectorization layer beforehand.
-    hub_embedding_layer = hub.KerasLayer(
-        embedding_url,
-        input_shape=[], # The layer expects a 1D tensor of strings
-        dtype=tf.string,
-        trainable=True # Set to True to fine-tune the embeddings for your specific task
+    # Shared Embedding layer, which produces 3D output (batch, sequence, dim)
+    shared_embedding = tf.keras.layers.Embedding(
+        input_dim=vocab_size,
+        output_dim=embedding_dim,
+        name='shared_embedding'
     )
-    shared_embedding = hub_embedding_layer
+    
+    # The shared Bidirectional LSTM layer is back
+    shared_lstm = tf.keras.layers.Bidirectional(
+        tf.keras.layers.LSTM(lstm_units), name='shared_bidirectional_lstm'
+    )
 
-    shared_lstm = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(lstm_layer))
+    # --- 3. Process Text Inputs ---
+    # First LSTM Branch (for premise)
+    vectorized_premise = shared_vectorizer(input_premise)
+    embedded_premise = shared_embedding(vectorized_premise)
+    encoded_premise = shared_lstm(embedded_premise)
 
-    # --- 3. First LSTM Branch ---
-    # Pass the first input through the shared layers
-    encoded_a = shared_embedding(input_a)
-    encoded_a = shared_lstm(encoded_a)
+    # Second LSTM Branch (for hypothesis)
+    vectorized_hypothesis = shared_vectorizer(input_hypothesis)
+    embedded_hypothesis = shared_embedding(vectorized_hypothesis)
+    encoded_hypothesis = shared_lstm(embedded_hypothesis)
 
-    # --- 4. Second LSTM Branch ---
-    # Pass the second input through the same shared layers
-    encoded_b = shared_embedding(input_b)
-    encoded_b = shared_lstm(encoded_b)
+    # --- 4. Process Language Input ---
+    lang_vectorizer = tf.keras.layers.TextVectorization(max_tokens=50, output_sequence_length=1)
+    lang_vectorizer.adapt(lang_data)
+    
+    encoded_lang = lang_vectorizer(input_lang)
+    encoded_lang = tf.keras.layers.Embedding(input_dim=50, output_dim=8, name='language_embedding')(encoded_lang)
+    encoded_lang = tf.keras.layers.Flatten()(encoded_lang)
 
-    # --- 5. Concatenate the Outputs ---
-    # Combine the outputs of both LSTM branches to be fed into the classifier
-    concatenated = tf.keras.layers.concatenate([encoded_a, encoded_b], name='concatenated_layer')
+    # --- 5. Concatenate All Outputs ---
+    concatenated = tf.keras.layers.concatenate(
+        [encoded_premise, encoded_hypothesis, encoded_lang], name='concatenated_layer'
+    )
 
     # --- 6. Add the Classifier (Dense Layers) ---
-    # One or two dense layers to learn the relationship between the two phrases
-    dense_1 = tf.keras.layers.Dense(128, activation='relu', name='dense_1')(concatenated)
+    dense_1 = tf.keras.layers.Dense(128, activation='relu', name='dense_1', kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
     dropout = tf.keras.layers.Dropout(0.5, name='dropout')(dense_1)
     
     # --- 7. Define the Final Output Layer ---
-    # For multi-class classification (e.g., contradiction, neutral, entailment)
-    output = tf.keras.layers.Dense(TASK_PROP__NUM_CLASSES, activation='softmax', name='output')(dropout)
+    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout)
 
     # --- 8. Build and Compile the Final Model ---
-    model = tf.keras.Model(inputs=[input_a, input_b], outputs=output)
-  
+    model = tf.keras.Model(inputs=[input_premise, input_hypothesis, input_lang], outputs=output)
+ 
     if hparams['OPTIMIZER_TYPE'] == 'adam':
         optimizer =tf.keras.optimizers.Adam(learning_rate=learning_rate,
                                         #beta_1=0.9,
@@ -225,9 +203,9 @@ def create_and_compile_model(vocab_size, embedding_dim, max_length, embedding_fi
                   #jit_compile='auto',
                   #auto_scale_loss=True
                   )
-    
+
     return model
-    
+
 
 def plot_training_charts(training_history, json_log_path, output_filename):
     """
@@ -315,64 +293,30 @@ def plot_training_charts(training_history, json_log_path, output_filename):
     except IOError as e:
         print(f"Error saving chart: {e}")
 
-def save_predictions_to_csv(predictions, output_path):
+def save_predictions_to_csv(predictions, ids, output_path):
     """
-    Saves the model's predictions to a CSV file in the Kaggle submission format.
+    Saves the model's predictions to a CSV file in the required submission format.
 
     Args:
-        predictions (np.ndarray): The output from the model.predict() method. 
-                                  This is expected to be a 2D array where each
-                                  row contains the probabilities for each class.
+        predictions (np.ndarray): The output from the model.predict() method.
+        ids (np.ndarray): The array of ids corresponding to the predictions.
         output_path (str): The file path where the submission CSV will be saved.
     """
-    # --- 1. Get the predicted label for each prediction ---
-    # The model outputs probabilities for each of the 10 digits.
-    # np.argmax finds the index of the highest probability for each row (axis=1).
-    # This index corresponds to the predicted digit (0-9).
+    # Get the predicted label for each prediction
     predicted_labels = np.argmax(predictions, axis=1)
 
-    # --- 2. Create the ImageId column ---
-    # Kaggle submissions typically have an 'ImageId' that starts from 1.
-    num_predictions = len(predicted_labels)
-    image_ids = np.arange(1, num_predictions + 1)
-
-    # --- 3. Create a pandas DataFrame ---
-    # The DataFrame will have the required 'ImageId' and 'Label' columns.
+    # Create a pandas DataFrame with the specified column names
     submission_df = pd.DataFrame({
-        'ImageId': image_ids,
-        'Label': predicted_labels
+        'id': ids,
+        'prediction': predicted_labels
     })
 
-    # --- 4. Save the DataFrame to a CSV file ---
-    # index=False is crucial to prevent pandas from writing the DataFrame
-    # index as an extra column in the file.
+    # Save the DataFrame to a CSV file
     try:
         submission_df.to_csv(output_path, index=False)
-        print(f"Successfully saved {num_predictions} predictions to {output_path}")
+        print(f"Successfully saved {len(predicted_labels)} predictions to {output_path}")
     except IOError as e:
         print(f"Error saving file: {e}")
-
-def fit_vectorizer(dataset):
-    """
-    Adapts the TextVectorization layer on the training sentences
-    
-    Args:
-        dataset (tf.data.Dataset): Tensorflow dataset with training sentences.
-    
-    Returns:
-        tf.keras.layers.TextVectorization: an instance of the TextVectorization class adapted to the training sentences.
-    """    
-    
-    # Instantiate the TextVectorization class, defining the necessary arguments alongside their corresponding values
-    vectorizer = tf.keras.layers.TextVectorization( 
-        standardize='lower_and_strip_punctuation',
-        output_sequence_length=MAX_LENGTH
-    ) 
-    
-    # Fit the tokenizer to the training sentences
-    vectorizer.adapt(dataset)
-    
-    return vectorizer
 
 if __name__ == '__main__':
 
@@ -383,15 +327,38 @@ if __name__ == '__main__':
         TRAIN_DATA_CSV_PATH = os.path.join(current_dir, "train.csv")
         TEST_DATA_CSV_PATH = os.path.join(current_dir, "test.csv")
         
-        print(f"Training dataset csv path: {TRAIN_DATA_CSV_PATH}")
-        print(f"Test dataset csv path: {TEST_DATA_CSV_PATH}")
+        # Read the data from CSV files once
+        premise_train, hypothesis_train, lang_abv_train, labels_train = read_data_from_csv(TRAIN_DATA_CSV_PATH, is_training_data=True)
+        premise_test, hypothesis_test, lang_abv_test, ids_test = read_data_from_csv(TEST_DATA_CSV_PATH, is_training_data=False)
+        
+        # Create TensorFlow datasets using dictionaries to map inputs to layer names
+        train_inputs = {
+            'input_premise': premise_train,
+            'input_hypothesis': hypothesis_train,
+            'input_language': lang_abv_train
+        }
+        train_dataset_csv = tf.data.Dataset.from_tensor_slices((train_inputs, labels_train))
 
-        print()
+        test_inputs = {
+            'input_premise': premise_test,
+            'input_hypothesis': hypothesis_test,
+            'input_language': lang_abv_test
+        }
+        test_dataset_raw = tf.data.Dataset.from_tensor_slices(test_inputs)
 
-        print("Decode test dataset")
-        test_dataset = read_dataset_from_csv(TEST_DATA_CSV_PATH, training_data = 0)
-        print("Decode train dataset")
-        train_dataset_csv = read_dataset_from_csv(TRAIN_DATA_CSV_PATH, training_data = 1)
+
+        print(f"Training dataset contains {len(train_dataset_csv)} examples\n")
+        print(f"Test dataset contains {len(test_dataset_raw)} examples\n")
+
+        # --- Create and adapt the TextVectorization layer ---
+        print("Adapting TextVectorization layer...")
+        vectorizer = tf.keras.layers.TextVectorization(
+            max_tokens=hparams['VOCAB_SIZE'],
+            output_sequence_length=hparams['MAX_LENGTH']
+        )
+        vectorizer.adapt(np.concatenate((premise_train, hypothesis_train)))
+        actual_vocab_size = len(vectorizer.get_vocabulary())
+        print(f"Vectorizer adapted. Actual vocabulary size: {actual_vocab_size}")
 
         # Calculate the number of elements for the training set
         train_size = int(hparams['TRAINING_SPLIT'] * len(train_dataset_csv))
@@ -417,20 +384,32 @@ if __name__ == '__main__':
         print()
 
         print(f"Create and compile model")
-        nn_model = create_and_compile_model(hparams['VOCAB_SIZE'], hparams['EMBEDDING_DIM'], hparams['MAX_LENGTH'], hparams['EMBEDDING_MODEL'], hparams['LSTM_LAYER'], hparams['LEARNING_RATE'])
-
+        nn_model = create_and_compile_model(
+            vectorizer, 
+            lang_abv_train,
+            actual_vocab_size, 
+            hparams['EMBEDDING_DIM'], 
+            hparams['LSTM_LAYER'], 
+            hparams['LEARNING_RATE'],
+            hparams['L2_REG_RATE']
+        )
         nn_model.summary()
 
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
             monitor='val_accuracy',    # Monitor the validation loss
+            #min_delta = 0,
             patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for 5 epochs
-            restore_best_weights=True # Restore model weights from the epoch with the best val_loss
+            verbose=1,
+            #mode='auto',
+            #baseline=None,
+            restore_best_weights=True, # Restore model weights from the epoch with the best val_loss
+            start_from_epoch=0
         )
 
         learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_accuracy',
                                                 factor=hparams['REDUCE_LR_FACTOR'],
                                                 patience=hparams['REDUCE_LR_PATIENCE'],
-                                                #verbose=0,
+                                                verbose=1,
                                                 #mode='auto',
                                                 #min_delta=0.0001,
                                                 #cooldown=0,
@@ -462,12 +441,11 @@ if __name__ == '__main__':
         loss_acc_chart_path = os.path.join(current_dir, "training_loss_acc_chart.html")
         plot_training_charts(training_history, history_log_path, loss_acc_chart_path)
 
-        SAVED_MODEL_PATH = os.path.join(current_dir, "trained_model_complete.h5")
-        nn_model.save(SAVED_MODEL_PATH)
+        SAVED_MODEL_PATH = os.path.join(current_dir, "trained_model_complete.tf")
+        nn_model.save(SAVED_MODEL_PATH, save_format='tf')
         print("\nModel saved to {SAVED_MODEL_PATH}")
 
-        test_dataset = create_test_dataset(test_data_folder_path)
-        predictions = nn_model.predict(test_dataset, #x
+        predictions = nn_model.predict(test_dataset_raw.batch(hparams['BATCH_SIZE']), #x
                                        #batch_size=None, 
                                        verbose=False, 
                                        #steps=None, 
@@ -475,7 +453,7 @@ if __name__ == '__main__':
                                        )
 
         prediction_csv_path = os.path.join(current_dir, "submission.csv")
-        save_predictions_to_csv(predictions, prediction_csv_path)
+        save_predictions_to_csv(predictions, ids_test, prediction_csv_path)
 
     except ValueError as e:
         print(f"\nError: {e}")
