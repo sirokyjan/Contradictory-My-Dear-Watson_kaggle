@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import tensorflow_hub as hub
+import tensorflow_text as text
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -14,17 +15,18 @@ hparams = {
     "TASK_PROP__NUM_CLASSES": 3,
 
     # Dataset preprocessing
-    "VOCAB_SIZE": 10000,
-    "EMBEDDING_DIM": 128,
-    "MAX_LENGTH": 32,
+    #"VOCAB_SIZE": 10000,
+    #"EMBEDDING_DIM": 128,
+    #"MAX_LENGTH": 32,
     "TRAINING_SPLIT": 0.9,
     "BATCH_SIZE": 16,
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
     "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
-    "EMBEDDING_MODEL": "https://tfhub.dev/google/nnlm-en-dim50/2",
-    "LSTM_LAYER": 64,
+    "EMBEDDING_MODEL_URL": "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3",
+    "DENSE_UNITS": 256,
+    #"LSTM_LAYER": 32,
     "L2_REG_RATE": 0.001,
 
     # Training
@@ -111,65 +113,37 @@ def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, voca
 
     return embedding_layer
 
-def create_and_compile_model(vectorizer, lang_data, vocab_size, embedding_dim, lstm_units, learning_rate, l2_rate):
+def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate):
     """
-    Builds a Siamese-like model with three inputs and two parallel Bidirectional LSTMs.
-    This version uses a TextVectorization layer and a standard Embedding layer.
+    Builds a Siamese-like model using a pre-trained multilingual sentence encoder.
+    This model is simpler and more powerful for multi-language tasks.
     """
-    # --- 1. Define the three input layers ---
+    # --- 1. Define the two input layers for raw text strings ---
     input_premise = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_premise')
     input_hypothesis = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_hypothesis')
-    input_lang = tf.keras.layers.Input(shape=(), dtype=tf.string, name='input_language')
 
-    # --- 2. Create Shared Layers ---
-    # Use the pre-adapted vectorizer passed into the function
-    shared_vectorizer = vectorizer
+    # --- 2. Create the Shared Multilingual Embedding Layer from TensorFlow Hub ---
+    # This layer handles tokenization and embedding for 16 languages.
+    shared_embedding_layer = hub.KerasLayer(embedding_url, trainable=False, name='universal_sentence_encoder')
 
-    # Shared Embedding layer, which produces 3D output (batch, sequence, dim)
-    shared_embedding = tf.keras.layers.Embedding(
-        input_dim=vocab_size,
-        output_dim=embedding_dim,
-        name='shared_embedding'
-    )
-    
-    # The shared Bidirectional LSTM layer is back
-    shared_lstm = tf.keras.layers.Bidirectional(
-        tf.keras.layers.LSTM(lstm_units), name='shared_bidirectional_lstm'
-    )
+    # --- 3. Process Both Inputs with the Shared Layer ---
+    embedded_premise = shared_embedding_layer(input_premise)
+    embedded_hypothesis = shared_embedding_layer(input_hypothesis)
 
-    # --- 3. Process Text Inputs ---
-    # First LSTM Branch (for premise)
-    vectorized_premise = shared_vectorizer(input_premise)
-    embedded_premise = shared_embedding(vectorized_premise)
-    encoded_premise = shared_lstm(embedded_premise)
-
-    # Second LSTM Branch (for hypothesis)
-    vectorized_hypothesis = shared_vectorizer(input_hypothesis)
-    embedded_hypothesis = shared_embedding(vectorized_hypothesis)
-    encoded_hypothesis = shared_lstm(embedded_hypothesis)
-
-    # --- 4. Process Language Input ---
-    lang_vectorizer = tf.keras.layers.TextVectorization(max_tokens=50, output_sequence_length=1)
-    lang_vectorizer.adapt(lang_data)
-    
-    encoded_lang = lang_vectorizer(input_lang)
-    encoded_lang = tf.keras.layers.Embedding(input_dim=50, output_dim=8, name='language_embedding')(encoded_lang)
-    encoded_lang = tf.keras.layers.Flatten()(encoded_lang)
-
-    # --- 5. Concatenate All Outputs ---
+    # --- 4. Concatenate the Sentence Embeddings ---
     concatenated = tf.keras.layers.concatenate(
-        [encoded_premise, encoded_hypothesis, encoded_lang], name='concatenated_layer'
+        [embedded_premise, embedded_hypothesis], name='concatenated_layer'
     )
 
-    # --- 6. Add the Classifier (Dense Layers) ---
-    dense_1 = tf.keras.layers.Dense(128, activation='relu', name='dense_1', kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
+    # --- 5. Add the Classifier (Dense Layers) ---
+    dense_1 = tf.keras.layers.Dense(dense_units, activation='relu', name='dense_1', kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
     dropout = tf.keras.layers.Dropout(0.5, name='dropout')(dense_1)
     
-    # --- 7. Define the Final Output Layer ---
+    # --- 6. Define the Final Output Layer ---
     output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout)
 
-    # --- 8. Build and Compile the Final Model ---
-    model = tf.keras.Model(inputs=[input_premise, input_hypothesis, input_lang], outputs=output)
+    # --- 7. Build and Compile the Final Model ---
+    model = tf.keras.Model(inputs=[input_premise, input_hypothesis], outputs=output)
  
     if hparams['OPTIMIZER_TYPE'] == 'adam':
         optimizer =tf.keras.optimizers.Adam(learning_rate=learning_rate,
@@ -190,8 +164,12 @@ def create_and_compile_model(vectorizer, lang_data, vocab_size, embedding_dim, l
                                         #**kwargs
                                     ) 
         
-    if hparams['OPTIMIZER_TYPE'] == 'rmsprop':
+    elif hparams['OPTIMIZER_TYPE'] == 'rmsprop':
         optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
+    
+    else:
+        print(f"Warning: Optimizer type '{hparams['OPTIMIZER_TYPE']}' not recognized. Defaulting to Adam.")
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     
     model.compile(optimizer=optimizer,
                   loss=hparams['LOSS_FUNCTION'],
@@ -204,8 +182,8 @@ def create_and_compile_model(vectorizer, lang_data, vocab_size, embedding_dim, l
                   #auto_scale_loss=True
                   )
 
-    return model
-
+    return model 
+    
 
 def plot_training_charts(training_history, json_log_path, output_filename):
     """
@@ -350,16 +328,6 @@ if __name__ == '__main__':
         print(f"Training dataset contains {len(train_dataset_csv)} examples\n")
         print(f"Test dataset contains {len(test_dataset_raw)} examples\n")
 
-        # --- Create and adapt the TextVectorization layer ---
-        print("Adapting TextVectorization layer...")
-        vectorizer = tf.keras.layers.TextVectorization(
-            max_tokens=hparams['VOCAB_SIZE'],
-            output_sequence_length=hparams['MAX_LENGTH']
-        )
-        vectorizer.adapt(np.concatenate((premise_train, hypothesis_train)))
-        actual_vocab_size = len(vectorizer.get_vocabulary())
-        print(f"Vectorizer adapted. Actual vocabulary size: {actual_vocab_size}")
-
         # Calculate the number of elements for the training set
         train_size = int(hparams['TRAINING_SPLIT'] * len(train_dataset_csv))
 
@@ -369,7 +337,7 @@ if __name__ == '__main__':
         # Create the validation dataset by skipping the first 'train_size' elements
         validation_dataset = train_dataset_csv.skip(train_size)
 
-        SHUFFLE_BUFFER_SIZE = 1000 #TODO this may be tuned
+        SHUFFLE_BUFFER_SIZE = 1000
         PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE
         train_dataset_final = train_dataset.cache().shuffle(SHUFFLE_BUFFER_SIZE).prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
         validation_dataset_final = validation_dataset.cache().prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
@@ -385,11 +353,8 @@ if __name__ == '__main__':
 
         print(f"Create and compile model")
         nn_model = create_and_compile_model(
-            vectorizer, 
-            lang_abv_train,
-            actual_vocab_size, 
-            hparams['EMBEDDING_DIM'], 
-            hparams['LSTM_LAYER'], 
+            hparams['EMBEDDING_MODEL_URL'], 
+            hparams['DENSE_UNITS'], 
             hparams['LEARNING_RATE'],
             hparams['L2_REG_RATE']
         )
@@ -402,8 +367,8 @@ if __name__ == '__main__':
             verbose=1,
             #mode='auto',
             #baseline=None,
-            restore_best_weights=True, # Restore model weights from the epoch with the best val_loss
-            start_from_epoch=0
+            restore_best_weights=True # Restore model weights from the epoch with the best val_loss
+            #start_from_epoch=0
         )
 
         learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_accuracy',
