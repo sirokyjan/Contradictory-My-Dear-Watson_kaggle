@@ -25,14 +25,17 @@ hparams = {
     "OPTIMIZER_TYPE": 'adam',
     "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
     "EMBEDDING_MODEL_URL": "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3",
+    "DENSE_LAYERS": 1,
     "DENSE_UNITS": 256,
+    "DENSE_UNITS_2": 32,
     #"LSTM_LAYER": 32,
-    "L2_REG_RATE": 0.001,
+    "L2_REG_RATE": 0.005,
+    "DROPOUT": 0.6,
 
     # Training
     "LEARNING_RATE": 0.0001,
     "EARLY_STOP_PATIENCE": 20,
-    "REDUCE_LR_PATIENCE": 20,
+    "REDUCE_LR_PATIENCE": 8,
     "REDUCE_LR_FACTOR": 0.2,
     "REDUCE_LR_MIN_LR": 0.00001,
     "EPOCHS": 100
@@ -113,7 +116,7 @@ def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, voca
 
     return embedding_layer
 
-def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate):
+def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate, dropout_param):
     """
     Builds a Siamese-like model using a pre-trained multilingual sentence encoder.
     This model is simpler and more powerful for multi-language tasks.
@@ -137,7 +140,7 @@ def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate)
 
     # --- 5. Add the Classifier (Dense Layers) ---
     dense_1 = tf.keras.layers.Dense(dense_units, activation='relu', name='dense_1', kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
-    dropout = tf.keras.layers.Dropout(0.5, name='dropout')(dense_1)
+    dropout = tf.keras.layers.Dropout(dropout_param, name='dropout')(dense_1)
     
     # --- 6. Define the Final Output Layer ---
     output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout)
@@ -356,7 +359,8 @@ if __name__ == '__main__':
             hparams['EMBEDDING_MODEL_URL'], 
             hparams['DENSE_UNITS'], 
             hparams['LEARNING_RATE'],
-            hparams['L2_REG_RATE']
+            hparams['L2_REG_RATE'],
+            hparams['DROPOUT']
         )
         nn_model.summary()
 
@@ -419,6 +423,13 @@ if __name__ == '__main__':
 
         prediction_csv_path = os.path.join(current_dir, "submission.csv")
         save_predictions_to_csv(predictions, ids_test, prediction_csv_path)
+
+        # Print the hyperparameter table
+        print("-" * 50)
+        print("Hyperparameters for this run:")
+        for key, value in hparams.items():
+            print(f"{key:<25}: {value}")
+        print("-" * 50)
 
     except ValueError as e:
         print(f"\nError: {e}")
