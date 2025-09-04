@@ -25,17 +25,19 @@ hparams = {
     "OPTIMIZER_TYPE": 'adam',
     "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
     "EMBEDDING_MODEL_URL": "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3",
-    "DENSE_LAYERS": 1,
-    "DENSE_UNITS": 256,
-    "DENSE_UNITS_2": 32,
+    "DENSE_LAYERS": 2,
+    "DENSE_UNITS_1": 256,
+    "DENSE_UNITS_2": 128,
     #"LSTM_LAYER": 32,
     "L2_REG_RATE": 0.005,
     "DROPOUT": 0.6,
+    #"KERNEL_INITIALIZER": 'glorot_uniform', # Added weight initializer. #'he_normal'
+    #"BIAS_INITIALIZER": 'zeros',         # Added bias initializer
 
     # Training
     "LEARNING_RATE": 0.0001,
     "EARLY_STOP_PATIENCE": 20,
-    "REDUCE_LR_PATIENCE": 8,
+    "REDUCE_LR_PATIENCE": 5,
     "REDUCE_LR_FACTOR": 0.2,
     "REDUCE_LR_MIN_LR": 0.00001,
     "EPOCHS": 100
@@ -116,7 +118,7 @@ def create_pretrained_embedding_layer(embedding_file_path, text_vectorizer, voca
 
     return embedding_layer
 
-def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate, dropout_param):
+def create_and_compile_model(embedding_url, dense_layers, dense_units, dense_units_2, learning_rate, l2_rate, dropout_param):
     """
     Builds a Siamese-like model using a pre-trained multilingual sentence encoder.
     This model is simpler and more powerful for multi-language tasks.
@@ -139,11 +141,25 @@ def create_and_compile_model(embedding_url, dense_units, learning_rate, l2_rate,
     )
 
     # --- 5. Add the Classifier (Dense Layers) ---
-    dense_1 = tf.keras.layers.Dense(dense_units, activation='relu', name='dense_1', kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
-    dropout = tf.keras.layers.Dropout(dropout_param, name='dropout')(dense_1)
+    dense_1 = tf.keras.layers.Dense(dense_units, 
+                                     activation='relu', 
+                                     #kernel_initializer=kernel_initializer,
+                                     #bias_initializer=bias_initializer,
+                                     name='dense_1', 
+                                     kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
+    dropout_1 = tf.keras.layers.Dropout(dropout_param, name='dropout_1')(dense_1)
+
+    if dense_layers>1:
+        dense_2 = tf.keras.layers.Dense(dense_units_2, 
+                                     activation='relu',
+                                     #kernel_initializer=kernel_initializer,
+                                     #bias_initializer=bias_initializer,
+                                     name='dense_2', 
+                                     kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(dropout_1)
+        dropout_2 = tf.keras.layers.Dropout(dropout_param, name='dropout_2')(dense_2)
     
     # --- 6. Define the Final Output Layer ---
-    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout)
+    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout_2 if dense_layers>1 else dropout)
 
     # --- 7. Build and Compile the Final Model ---
     model = tf.keras.Model(inputs=[input_premise, input_hypothesis], outputs=output)
@@ -356,8 +372,10 @@ if __name__ == '__main__':
 
         print(f"Create and compile model")
         nn_model = create_and_compile_model(
-            hparams['EMBEDDING_MODEL_URL'], 
-            hparams['DENSE_UNITS'], 
+            hparams['EMBEDDING_MODEL_URL'],
+            hparams['DENSE_LAYERS'], 
+            hparams['DENSE_UNITS_1'],
+            hparams['DENSE_UNITS_2'], 
             hparams['LEARNING_RATE'],
             hparams['L2_REG_RATE'],
             hparams['DROPOUT']
