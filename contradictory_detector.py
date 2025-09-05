@@ -19,7 +19,7 @@ hparams = {
     #"EMBEDDING_DIM": 128,
     #"MAX_LENGTH": 32,
     "TRAINING_SPLIT": 0.9,
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 32,
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
@@ -29,18 +29,18 @@ hparams = {
     "DENSE_UNITS_1": 256,
     "DENSE_UNITS_2": 128,
     #"LSTM_LAYER": 32,
-    "L2_REG_RATE": 0.005,
-    "DROPOUT": 0.6,
+    "L2_REG_RATE": 0.007,
+    "DROPOUT": 0.7,
     #"KERNEL_INITIALIZER": 'glorot_uniform', # Added weight initializer. #'he_normal'
     #"BIAS_INITIALIZER": 'zeros',         # Added bias initializer
 
     # Training
-    "LEARNING_RATE": 0.0001,
+    "LEARNING_RATE": 0.0003,
     "EARLY_STOP_PATIENCE": 20,
-    "REDUCE_LR_PATIENCE": 5,
+    "REDUCE_LR_PATIENCE": 8,
     "REDUCE_LR_FACTOR": 0.2,
     "REDUCE_LR_MIN_LR": 0.00001,
-    "EPOCHS": 100
+    "EPOCHS": 300
 }
 
 def read_data_from_csv(csv_path, is_training_data=True):
@@ -159,7 +159,7 @@ def create_and_compile_model(embedding_url, dense_layers, dense_units, dense_uni
         dropout_2 = tf.keras.layers.Dropout(dropout_param, name='dropout_2')(dense_2)
     
     # --- 6. Define the Final Output Layer ---
-    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout_2 if dense_layers>1 else dropout)
+    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout_2 if dense_layers>1 else dropout_1)
 
     # --- 7. Build and Compile the Final Model ---
     model = tf.keras.Model(inputs=[input_premise, input_hypothesis], outputs=output)
