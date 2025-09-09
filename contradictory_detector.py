@@ -29,7 +29,7 @@ hparams = {
     "DENSE_UNITS_1": 256,
     "DENSE_UNITS_2": 128,
     #"LSTM_LAYER": 32,
-    "L2_REG_RATE": 0.005,
+    "L2_REG_RATE": 0.006,
     "DROPOUT": 0.6,
     #"KERNEL_INITIALIZER": 'glorot_uniform', # Added weight initializer. #'he_normal'
     #"BIAS_INITIALIZER": 'zeros',         # Added bias initializer
@@ -40,7 +40,7 @@ hparams = {
     "REDUCE_LR_PATIENCE": 8,
     "REDUCE_LR_FACTOR": 0.2,
     "REDUCE_LR_MIN_LR": 0.00001,
-    "EPOCHS": 300
+    "EPOCHS": 500
 }
 
 def read_data_from_csv(csv_path, is_training_data=True):
@@ -383,7 +383,7 @@ if __name__ == '__main__':
         nn_model.summary()
 
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
-            monitor='val_accuracy',    # Monitor the validation loss
+            monitor='accuracy',    # Monitor the validation loss
             #min_delta = 0,
             patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for 5 epochs
             verbose=1,
@@ -393,7 +393,7 @@ if __name__ == '__main__':
             #start_from_epoch=0
         )
 
-        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_accuracy',
+        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='accuracy',
                                                 factor=hparams['REDUCE_LR_FACTOR'],
                                                 patience=hparams['REDUCE_LR_PATIENCE'],
                                                 verbose=1,
