@@ -25,7 +25,7 @@ hparams = {
     "OPTIMIZER_TYPE": 'adam',
     "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
     "EMBEDDING_MODEL_URL": "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3",
-    "DENSE_LAYERS": 2,
+    "DENSE_LAYERS": 1,
     "DENSE_UNITS_1": 256,
     "DENSE_UNITS_2": 128,
     #"LSTM_LAYER": 32,
