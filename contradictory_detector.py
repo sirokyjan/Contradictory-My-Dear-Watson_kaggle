@@ -135,9 +135,12 @@ def create_and_compile_model(embedding_url, dense_layers, dense_units, dense_uni
     embedded_premise = shared_embedding_layer(input_premise)
     embedded_hypothesis = shared_embedding_layer(input_hypothesis)
 
+    difference = tf.abs(tf.subtract(embedded_premise, embedded_hypothesis))
+    product = tf.multiply(embedded_premise, embedded_hypothesis)
+
     # --- 4. Concatenate the Sentence Embeddings ---
     concatenated = tf.keras.layers.concatenate(
-        [embedded_premise, embedded_hypothesis], name='concatenated_layer'
+        [embedded_premise, embedded_hypothesis, difference, product], name='concatenated_layer'
     )
 
     # --- 5. Add the Classifier (Dense Layers) ---
